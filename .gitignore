@@ -1,0 +1,64 @@
+# ===== 通用 =====
+
+# macOS
+.DS_Store
+
+# IDE / Editor
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+
+# ===== Rust =====
+
+target/
+
+
+# ===== Python =====
+
+__pycache__/
+*.py[cod]
+*.so
+.python-version
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+
+# ===== Go =====
+
+# Binaries / test artifacts
+bin/
+*.test
+coverage.out
+*.coverprofile
+
+
+# ===== Java / Gradle =====
+
+.gradle/
+build/
+out/
+
+
+# ===== C / C++ / CMake =====
+
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
