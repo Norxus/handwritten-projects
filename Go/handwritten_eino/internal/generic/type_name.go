@@ -12,6 +12,7 @@ var (
 	regOfNumber        = regexp.MustCompile(`^\d+$`)
 )
 
+// 拿到类型的名称，如果是函数，需要进行更加精细化处理
 func ParseTypeName(val reflect.Value) string {
 	typ := val.Type()
 

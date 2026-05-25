@@ -1,15 +1,22 @@
-use compat_harness::{extract_manifest, UpstreamPaths};
-use runtime::{ConversationRuntime, PermissionMode, ResolvedPermissionMode};
+use commands::{
+    handle_agents_slash_command, handle_agents_slash_command_json, handle_mcp_slash_command,
+    handle_mcp_slash_command_json, handle_skills_slash_command, handle_skills_slash_command_json,
+};
+use compat_harness::{extract_manifest, extract_tools, UpstreamPaths};
+use plugins::PluginRegistry;
+use runtime::{
+    ConfigLoader, ConversationRuntime, McpServer, McpServerSpec, McpTool, PermissionMode,
+    ResolvedPermissionMode,
+};
+use serde_json::{json, Value};
+use std::process::Output;
+use std::sync::{Arc, Mutex};
 use std::{
     collections::BTreeSet,
     env,
     path::{Path, PathBuf},
 };
-use std::sync::{Arc, Mutex};
-use serde_json::json;
-use commands::handle_agents_slash_command;
-use plugins::PluginRegistry;
-use tools::GlobalToolRegistry;
+use tools::{mvp_tool_specs, GlobalToolRegistry};
 
 const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_token_for_model(model: &str) -> u32 {
@@ -19,6 +26,8 @@ fn max_token_for_model(model: &str) -> u32 {
         64_000
     }
 }
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
@@ -66,6 +75,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             args,
             output_format,
         } => LiveCli::print_agents(args.as_deref(), output_format)?,
+        CliAction::Mcp {
+            args,
+            output_format,
+        } => LiveCli::print_mcp(args.as_deref(), output_format)?,
+        CliAction::Skills {
+            args,
+            output_format,
+        } => LiveCli::print_skills(args.as_deref(), output_format)?,
+        CliAction::Plugins {
+            action,
+            target,
+            output_format,
+        } => LiveCli::print_plugins(action.as_deref(), target.as_deref(), output_format)?,
     }
 
     Ok(())
@@ -82,6 +104,7 @@ struct LiveCli {
 }
 
 impl LiveCli {
+    // 打印出所有的 agent 信息
     fn print_agents(
         args: Option<&str>,
         output_format: CliOutputFormat,
@@ -96,21 +119,104 @@ impl LiveCli {
         }
         Ok(())
     }
+
+    // 打印所有的 mcp 信息
+    fn print_mcp(
+        args: Option<&str>,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // 参数里面是不是有 serve，如果有，那么就启动 mcp 服务
+        // `claw mcp serve` starts a stdio MCP server exposing claw's built-in
+        // tools. All other `mcp` subcommands fall through to the existing
+        // configured-server reporter (`list`, `status`, ...).
+        if matches!(args.map(str::trim), Some("serve")) {
+            return run_mcp_serve();
+        }
+        let cwd = env::current_dir()?;
+        match output_format {
+            CliOutputFormat::Text => println!("{}", handle_mcp_slash_command(args, &cwd)?),
+            CliOutputFormat::Json => {
+                let value = handle_mcp_slash_command_json(args, &cwd)?;
+                let is_error = value.get("ok").and_then(|v| v.as_bool()) == Some(false);
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                if is_error {
+                    std::process::exit(1);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn print_skills(
+        args: Option<&str>,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        match output_format {
+            CliOutputFormat::Text => println!("{}", handle_skills_slash_command(args, &cwd)?),
+            CliOutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&handle_skills_slash_command_json(args, &cwd)?)?,
+            ),
+        }
+        Ok(())
+    }
+
+    fn print_plugins(
+        acton: Option<&str>,
+        target: Option<&str>,
+        output_format: CliOutputFormat,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cwd = env::current_dir()?;
+        let loader = ConfigLoader::default_for(&cwd)?;
+        let runtime_config = loader.load()?;
+        let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
+        let result = handle_plugin_slash_command(action, target, &mut manager)?;
+    }
+}
+
+fn run_mcp_serve() -> Result<(), Box<dyn std::error::Error>> {
+    let tools = mvp_tool_specs()
+        .into_iter()
+        .map(|spec| McpTool {
+            name: spec.name.to_string(),
+            description: Some(spec.description.to_string()),
+            input_schema: Some(spec.input_schema),
+            annotations: None,
+            meta: None,
+        })
+        .collect();
+
+    let spec = McpServerSpec {
+        server_name: "claw".to_string(),
+        server_version: VERSION.to_string(),
+        tools,
+        tool_handler: Box::new(extract_tools),
+    };
+
+    // 创建一个 只在当前线程运行 的 Tokio runtime
+    // .enable_all() 打开定时器、IO 等能力
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    // 当前线程会一直待在这里执行这个异步任务，直到它结束
+    runtime.block_on(async move {
+        let mut server = McpServer::new(spec);
+        server.run().await
+    })?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
-struct PromptHistoryEntry {
-
-}
+struct PromptHistoryEntry {}
 
 struct SessionHandle {
     id: String,
     path: PathBuf,
 }
 
-struct RuntimeMcpState {
-
-}
+struct RuntimeMcpState {}
 
 struct BuiltRuntime {
     runtime: Option<ConversationRuntime<AnthropicRuntimeClient, CliToolExecutor>>,
@@ -120,13 +226,11 @@ struct BuiltRuntime {
     mcp_active: bool,
 }
 
-struct AnthropicRuntimeClient {
-}
+struct AnthropicRuntimeClient {}
 
-struct CliToolExecutor {
+struct CliToolExecutor {}
 
-}
-
+// 打印出所有的阶段
 fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
     let phases = runtime::BootstrapPlan::claude_code_default()
         .phases()
@@ -329,7 +433,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 if prompt.trim().is_empty() {
                     return Err("-p requires a prompt string".to_string());
                 }
-                return OK(CliAction::Prompt {
+                return Ok(CliAction::Prompt {
                     prompt,
                     model: resolve_model_alias(&model).to_string(),
                     output_format,
@@ -407,8 +511,8 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
     let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
 
     match rest[0].as_str() {
-        "dump-manifests" => Ok(CliAction::DumpManifests),
-        "bootstrap-plan" => Ok(CliAction::BootstrapPlan),
+        "dump-manifests" => parse_dump_manifests_args(&rest[1..], output_format),
+        "bootstrap-plan" => Ok(CliAction::BootstrapPlan { output_format }),
         "agents" => Ok(CliAction::Agents {
             args: join_optional_args(&rest[1..]),
         }),
@@ -444,6 +548,12 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             permission_mode,
         }),
     }
+}
+
+fn parse_dump_manifests_args(
+    args: &[String],
+    output_format: CliOutputFormat,
+) -> Result<CliAction, String> {
 }
 
 fn parse_permission_mode_arg(value: &str) -> Result<PermissionMode, String> {
@@ -633,7 +743,13 @@ fn permission_mode_from_resolved(mode: ResolvedPermissionMode) -> PermissionMode
     }
 }
 
-fn dump_manifests(manifests_dir: Option<&Path>, output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+// 从 claude-code 的源码 (也就是本地要有 claude-code 的源码) 中提取元信息，
+// 包括 CLI 命令和工具的描述信息，然后按照指定的格式把这些信息打印出来
+// 有点偷懒的感觉，感觉可能是用 ai 重写的时候，触发了 context 容量焦虑
+fn dump_manifests(
+    manifests_dir: Option<&Path>,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
     let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     dump_manifests_at_path(&workspace_dir, manifests_dir, output_format)
 }
@@ -671,7 +787,7 @@ fn dump_manifests_at_path(
 
     let missing = required_paths
         .iter()
-        .filter_map(|(label, path)|(!path.is_file()).then_some(label))
+        .filter_map(|(label, path)| (!path.is_file()).then_some(label))
         .collect::<Vec<_>>();
 
     if !missing.is_empty() {
@@ -681,7 +797,7 @@ fn dump_manifests_at_path(
                source_root.display(),
                missing.join(", "),
            ).into()
-        )
+        );
     }
 
     match extract_manifest(&paths) {
