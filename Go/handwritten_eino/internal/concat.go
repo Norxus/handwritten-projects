@@ -168,9 +168,11 @@ func concatMaps(ms reflect.Value) (reflect.Value, error) {
 	return ret, nil
 }
 
+// 把 slice 合并成一个最终的值，如果 slice 里有多个非零值会报错
 func concatSliceValue(val reflect.Value) (reflect.Value, error) {
 	elmType := val.Type().Elem()
 
+	// 如果只有一个元素，直接返回这个元素
 	if val.Len() == 1 {
 		return val.Index(0), nil
 	}

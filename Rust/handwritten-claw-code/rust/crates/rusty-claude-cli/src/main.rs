@@ -6,7 +6,7 @@ use compat_harness::{extract_manifest, extract_tools, UpstreamPaths};
 use plugins::PluginRegistry;
 use runtime::{
     ConfigLoader, ConversationRuntime, McpServer, McpServerSpec, McpTool, PermissionMode,
-    ResolvedPermissionMode,
+    ResolvedPermissionMode, load_system_prompt,
 };
 use serde_json::{json, Value};
 use std::process::Output;
@@ -88,6 +88,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             target,
             output_format,
         } => LiveCli::print_plugins(action.as_deref(), target.as_deref(), output_format)?,
+        CliAction::PrintSystemPrompt {
+            cwd,
+            date,
+            output_format,
+        } => print_system_prompt(cwd, date, &model, output_format)?,
     }
 
     Ok(())
@@ -163,7 +168,7 @@ impl LiveCli {
     }
 
     fn print_plugins(
-        acton: Option<&str>,
+        action: Option<&str>,
         target: Option<&str>,
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -172,7 +177,53 @@ impl LiveCli {
         let runtime_config = loader.load()?;
         let mut manager = build_plugin_manager(&cwd, &loader, &runtime_config);
         let result = handle_plugin_slash_command(action, target, &mut manager)?;
+        match output_format {
+            CliOutputFormat::Text => println!("{}", result.message),
+            CliOutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                "kind"    : "plugin",
+                "action": action.unwrap_or("list"),
+                "target": target,
+                "message": result.message,
+                "reload_runtime": result.reload_runtime,
+                }))
+            ),
+        }
+        Ok(())
     }
+}
+
+fn print_system_prompt(
+    cwd: PathBuf,
+    date: String,
+    model: &str,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sections = load_system_prompt(
+        cwd,
+        date,
+        env::consts::OS,
+        "unknown",
+        model_family_identity_for(model),
+    )?;
+    let message = sections.join(
+        "
+
+",
+    );
+    match output_format {
+        CliOutputFormat::Text => println!("message"),
+        CliOutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "kind": "system-prompt",
+                "message": message,
+                "sections": sections,
+            }))?
+        ),
+    }
+    Ok(())
 }
 
 fn run_mcp_serve() -> Result<(), Box<dyn std::error::Error>> {
@@ -253,6 +304,21 @@ fn print_bootstrap_plan(output_format: CliOutputFormat) -> Result<(), Box<dyn st
         ),
     }
     Ok(())
+}
+
+fn print_system_propmt(
+    cwd: PathBuf,
+    date: String,
+    model: &str,
+    output_format: CliOutputFormat,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sections = load_system_prompt(
+        cwd,
+        date,
+        env::consts::OS,
+        "unknown",
+        model_family_identity_for(model),
+    )?;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

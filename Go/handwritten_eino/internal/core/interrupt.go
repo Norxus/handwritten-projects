@@ -23,7 +23,7 @@ type InterruptSignal struct {
 
 func (is *InterruptSignal) Error() string {
 	return fmt.Sprintf("interrupt signal: ID=%s, Addr=%s, Info=%s, State=%s, SubsLen=%d",
-		is.ID, is.Address.String(), is.InterruptInfo.String, is.InterruptState.String(), len(is.subs))
+		is.ID, is.Address.String(), is.InterruptInfo.String(), is.InterruptState.String(), len(is.Subs))
 }
 
 type InterruptState struct {
