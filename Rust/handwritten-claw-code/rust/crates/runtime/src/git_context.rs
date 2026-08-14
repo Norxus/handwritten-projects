@@ -41,7 +41,7 @@ impl GitContext {
 
         // 打印分支
         if let Some(branch) = &self.branch {
-            lines.push(format!("Git branch" {branch}));
+            lines.push(format!("Git branch {branch}"));
         }
 
         // 打印 commit 信息

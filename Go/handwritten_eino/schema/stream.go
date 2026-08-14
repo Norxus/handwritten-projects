@@ -38,6 +38,7 @@ func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
 	return stm.asReader(), &StreamWriter[T]{stm: stm}
 }
 
+// 在 stream 外面包了一层，用于装饰，底层调用的还是 stream 的 send 方法
 type StreamWriter[T any] struct {
 	stm *stream[T]
 }
@@ -291,7 +292,9 @@ func WithErrWrapper(wrapper func(error) error) ConvertOption {
 	}
 }
 
+// 使用 convert 转换获取的每一个元素
 func StreamReaderWithConvert[T, D any](sr *StreamReader[T], convert func(T) (D, error), opts ...ConvertOption) *StreamReader[D] {
+	// 把转换函数包装一下，这样才可以使用 newStreamReaderWithConvert 基建
 	c := func(a any) (D, error) {
 		return convert(a.(T))
 	}
@@ -668,6 +671,7 @@ type reader[T any] interface {
 	close()
 }
 
+// 起一个 goroutine，持续从传入的 reader 里调用 recv() 拿数据，再转发到返回的 *stream[T] 里
 // 从 r Reader 把数据发送到 *stream[T] 中
 // T any：定义了一个类型参数 T，any 表示 T 可以是任意类型
 // Reader reader[T]：定义了第二个类型参数 Reader，这个类型参数不能随便取，必须满足约束 reader[T]
@@ -713,4 +717,80 @@ func toStream[T any, Reader reader[T]](r Reader) *stream[T] {
 	}()
 
 	return ret
+}
+
+// 合并一堆 stream reader 成为一个 stream reader
+func MergeStreamReaders[T any](srs []*StreamReader[T]) *StreamReader[T] {
+	if len(srs) < 1 {
+		return nil
+	}
+
+	if len(srs) < 2 {
+		return srs[0]
+	}
+
+	var arr []T
+	var ss []*stream[T]
+
+	// 按照不同类型分开处理
+	for _, sr := range srs {
+		switch sr.typ {
+		case readerTypeStream:
+			ss = append(ss, sr.st)
+		case readerTypeArray:
+			// 把数组里还没读完的数据都放到 arr 中
+			arr = append(arr, sr.ar.arr[sr.ar.index:]...)
+		case readerTypeMultiStream:
+			// 把 multi stream 里的所有还没关闭的子流都放到 ss 中
+			ss = append(ss, sr.msr.nonClosedStreams()...)
+		case readerTypeWithConvert:
+			// 转换成普通 stream
+			ss = append(ss, sr.srw.toStream())
+		case readerTypeChild:
+			ss = append(ss, sr.csr.toStream())
+		default:
+			panic("impossible")
+		}
+	}
+
+	// 说明全是数组类型
+	if len(ss) == 0 {
+		return &StreamReader[T]{
+			typ: readerTypeArray,
+			ar: &arrayReader[T]{
+				arr:   arr,
+				index: 0,
+			},
+		}
+	}
+
+	// 数组类型和 stream 类型都有，就把数组类型转换为 stream 类型
+	if len(arr) != 0 {
+		s := arrToStream(arr)
+		ss = append(ss, s)
+	}
+
+	// 最后合并为一个 multi stream reader
+	return &StreamReader[T]{
+		typ: readerTypeMultiStream,
+		msr: newMultiStreamReader(ss),
+	}
+}
+
+// 把一组带名字的 StreamReader[T] 合并成一个 StreamReader[T]
+func InternalMergeNamedStreamReaders[T any](srs []*StreamReader[T], names []string) *StreamReader[T] {
+	ss := make([]*stream[T], len(srs))
+	// 把 reader 转换为 stream 类型
+	for i, sr := range srs {
+		ss[i] = sr.toStream()
+	}
+
+	//记录每个 reader 的名字
+	msr := newMultiStreamReader(ss)
+	msr.sourceReaderNames = names
+
+	return &StreamReader[T]{
+		typ: readerTypeMultiStream,
+		msr: msr,
+	}
 }

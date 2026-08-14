@@ -17,6 +17,8 @@ type CallbackInput any
 
 type CallbackOutput any
 
+type CallbackTiming uint8
+
 type Handler interface {
 	OnStart(ctx context.Context, info *RunInfo, input CallbackInput) context.Context
 	OnEnd(ctx context.Context, info *RunInfo, ouput CallbackOutput) context.Context
@@ -28,4 +30,8 @@ type Handler interface {
 
 	OnEndWithStreamOutput(ctx context.Context, info *RunInfo,
 		output *schema.StreamReader[CallbackOutput]) context.Context
+}
+
+type TimingChecker interface {
+	Needed(ctx context.Context, info *RunInfo, timing CallbackTiming) bool
 }

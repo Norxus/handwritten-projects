@@ -3,9 +3,9 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-;
+
 use crate::SandboxConfig;
-use crate::json::{JsonValue}
+use crate::json::{JsonValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConfigSource {

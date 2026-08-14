@@ -131,6 +131,32 @@ class SQLiteManager:
                 logger.error(f"History table migration failed: {e}")
                 raise
 
+    def _create_history_table(self) -> None:
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS history (
+                        id           TEXT PRIMARY KEY,
+                        memory_id    TEXT,
+                        old_memory   TEXT,
+                        new_memory   TEXT,
+                        event        TEXT,
+                        created_at   DATETIME,
+                        updated_at   DATETIME,
+                        is_deleted   INTEGER,
+                        actor_id     TEXT,
+                        role         TEXT
+                    )
+                    """
+                )
+                self.connection.execute("COMMIT")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"failed to create history table: {e}")
+                raise
+
     def _create_message_table(self) -> None:
         with self._lock:
             try:

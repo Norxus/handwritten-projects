@@ -1,16 +1,18 @@
+use api::model_family_identity_for;
 use commands::{
     handle_agents_slash_command, handle_agents_slash_command_json, handle_mcp_slash_command,
     handle_mcp_slash_command_json, handle_skills_slash_command, handle_skills_slash_command_json,
+    SlashCommand,
 };
 use compat_harness::{extract_manifest, extract_tools, UpstreamPaths};
 use plugins::PluginRegistry;
 use runtime::{
-    ConfigLoader, ConversationRuntime, McpServer, McpServerSpec, McpTool, PermissionMode,
-    ResolvedPermissionMode, load_system_prompt,
+    ConfigLoader, ConversationRuntime, McpServer, McpServerSpec, McpTool, PermissionMode, ResolvedPermissionMode, Session, UsageTracker, load_system_prompt
 };
 use serde_json::{json, Value};
 use std::process::Output;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 use std::{
     collections::BTreeSet,
     env,
@@ -27,7 +29,13 @@ fn max_token_for_model(model: &str) -> u32 {
     }
 }
 
+const DEFAULT_DATE: &str = match option_env!("BUILD_DATE") {
+    Some(d) => d,
+    None => "unknown",
+};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_SHA: Option<&str> = option_env!("GIT_SHA");
+const BUILD_TARGET: Option<&str> = option_env!("TARGET");
 
 const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--help",
@@ -43,6 +51,120 @@ const CLI_OPTION_SUGGESTIONS: &[&str] = &[
     "--resume",
     "--print",
     "-p",
+];
+
+// 当前这版 CLI 里“已经登记在命令规范里，但实际上还没实现”的斜杠命令名单
+const STUB_COMMANDS: &[&str] = &[
+    "login",
+    "logout",
+    "vim",
+    "upgrade",
+    "share",
+    "feedback",
+    "files",
+    "fast",
+    "exit",
+    "summary",
+    "desktop",
+    "brief",
+    "advisor",
+    "stickers",
+    "insights",
+    "thinkback",
+    "release-notes",
+    "security-review",
+    "keybindings",
+    "privacy-settings",
+    "plan",
+    "review",
+    "tasks",
+    "theme",
+    "voice",
+    "usage",
+    "rename",
+    "copy",
+    "hooks",
+    "context",
+    "color",
+    "effort",
+    "branch",
+    "rewind",
+    "ide",
+    "tag",
+    "output-style",
+    "add-dir",
+    // Spec entries with no parse arm — produce circular "Did you mean" error
+    // without this guard. Adding here routes them to the proper unsupported
+    // message and excludes them from REPL completions / help.
+    // NOTE: do NOT add "stats", "tokens", "cache" — they are implemented.
+    "allowed-tools",
+    "bookmarks",
+    "workspace",
+    "reasoning",
+    "budget",
+    "rate-limit",
+    "changelog",
+    "diagnostics",
+    "metrics",
+    "tool-details",
+    "focus",
+    "unfocus",
+    "pin",
+    "unpin",
+    "language",
+    "profile",
+    "max-tokens",
+    "temperature",
+    "system-prompt",
+    "notifications",
+    "telemetry",
+    "env",
+    "project",
+    "terminal-setup",
+    "api-key",
+    "reset",
+    "undo",
+    "stop",
+    "retry",
+    "paste",
+    "screenshot",
+    "image",
+    "search",
+    "listen",
+    "speak",
+    "format",
+    "test",
+    "lint",
+    "build",
+    "run",
+    "git",
+    "stash",
+    "blame",
+    "log",
+    "cron",
+    "team",
+    "benchmark",
+    "migrate",
+    "templates",
+    "explain",
+    "refactor",
+    "docs",
+    "fix",
+    "perf",
+    "chat",
+    "web",
+    "map",
+    "symbols",
+    "references",
+    "definition",
+    "hover",
+    "autofix",
+    "multi",
+    "macro",
+    "alias",
+    "parallel",
+    "subagent",
+    "agent",
 ];
 
 type AllowedToolSet = BTreeSet<String>;
@@ -93,6 +215,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             date,
             output_format,
         } => print_system_prompt(cwd, date, &model, output_format)?,
+        CliAction::Version { output_format } => print_version(output_format)?,
+        CliAction::ResumeSession {
+            session_path,
+            commands,
+            output_format,
+        } => resume_session(&session_path, &commands, output_format),
     }
 
     Ok(())
@@ -192,6 +320,443 @@ impl LiveCli {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+struct ResumeCommandOutcome {
+    session: Session,
+    message: Option<String>,
+    json: Option<serde_json::Value>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn resume_session(session_path: &Path, commands: &[String], output_format: CliOutputFormat) {
+    // 文件路径在操作系统里不一定保证是合法 UTF-8，Rust 不鼓励你直接把路径当 String 用
+    let session_reference = session_path.display().to_string();
+    let (handle, session) = match load_session_reference(&session_reference) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            if output_format == CliOutputFormat::Json {
+                let full_message = format!("failed to restore session: {error}");
+                let kind = classify_error_kind(&full_message);
+                let (short_reason, hint) = split_error_hint(&full_message);
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "type": "error",
+                        "error": short_reason,
+                        "kind": kind,
+                        "hint": hint,
+                    })
+                );
+            } else {
+                eprintln!("failed to restore session: {error}")
+            }
+            std::process::exit(1);
+        }
+    };
+    let resolved_path = handle.path.clone();
+
+    if commands.is_empty() {
+        if output_format == CliOutputFormat::Json {
+            println!(
+                "{}",
+                serde_json::json!(
+                    {
+                        "kind": "restored",
+                        "session_id": session.session_id,
+                        "path": handle.path.display().to_string(),
+                        "message_count": session.messages.len(),
+                    }
+                )
+            );
+        } else {
+            println!(
+                "Restored session from {} ({} messages).",
+                handle.path.display(),
+                session.messages.len(),
+            )
+        }
+        return;
+    }
+
+    let mut session = session;
+    for raw_command in commands {
+        {
+            let cmd_root = raw_command
+                .trim_start_matches('/')
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if STUB_COMMANDS.contains(&cmd_root) {
+                if output_format == CliOutputFormat::Json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "error",
+                            "error": format!("/{cmd_root} is not yet implemented in this build"),
+                            "kind": "unsupported_command",
+                            "command": raw_command,
+                        })
+                    );
+                } else {
+                    eprintln!("/{cmd_root} is not yet implemented in this build");
+                }
+                // 立刻终止整个 CLI 进程，并把退出码设为 2
+                std::process::exit(2)
+            }
+        }
+
+        let command = match SlashCommand::parse(raw_command) {
+            Ok(Some(command)) => command,
+            Ok(None) => {
+                if output_format == CliOutputFormat::Json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "error",
+                            "error": format!("unsupported resumed command"),
+                            "kind": "unsupported_resumed_command",
+                            "command": raw_command,
+                        })
+                    );
+                } else {
+                    eprintln!("unsupported resumed command: {raw_command}");
+                }
+                std::process::exit(2)
+            }
+            Err(error) => {
+                if output_format == CliOutputFormat::Json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "error",
+                            "error": error.to_string(),
+                            "command": raw_command,
+                        })
+                    );
+                } else {
+                    eprintln!("{error}");
+                }
+                std::process::exit(2);
+            }
+        };
+
+        match run_resume_command(&resolved_path, &session, &command) {
+            Ok(ResumeCommandOutcome {
+                session: next_session,
+                message,
+                json,
+            }) => {
+                session = next_session;
+                if output_format == CliOutputFormat::Json {
+                    if let Some(value) = json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&value)
+                                .expect("resume command json output")
+                        );
+                    } else if let Some(message) = message {
+                        println!("{message}");
+                    }
+                } else if let Some(message) = message {
+                    println!("{message}")
+                }
+            }
+            Err(error) => {
+                if output_format == CliOutputFormat::Json {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "type": "error",
+                            "error": error.to_string(),
+                            "command": raw_command,
+                        })
+                    )
+                } else {
+                    eprintln!("{error}")
+                }
+                std::process::exit(2);
+            }
+        }
+    }
+}
+
+fn run_resume_command(
+    session_path: &Path,
+    session: &Session,
+    command: &SlashCommand,
+) -> Result<ResumeCommandOutcome, Box<dyn std::error::Error>> {
+    match command {
+        SlashCommand::Help => Ok(ResumeCommandOutcome {
+            session: session.clone(),
+            message: Some(render_repl_help()),
+            json: Some(serde_json::json!({"kind": "help", "text": render_repl_help()})),
+        }),
+        SlashCommand::Compact => {
+            let result = runtime::compact_session(
+                session,
+                CompactCongfig {
+                    max_estimated_tokens: 0,
+                    ..CompactionConfig::default()
+                }
+            );
+            let removed = result.removed_message_count;
+            let kept = result.compacted_session.messages.iter().len();
+            // removed == 0 ：这次 compact 没有可压缩内容，相当于“跳过了”
+            let skipped = removed == 0;
+            // 把压缩后的 session 持久化到文件中
+            result.compacted_session.save_to_path(session_path)?;
+            Ok(ResumeCommandOutcome{
+                session: result.compacted_session,
+                message: Some(format_compact_report(removed, kept, skipped))),
+                json: Some(serde_json::json!({
+                    "kind": "compact",
+                    "skipped": skipped,
+                    "removed_messages": removed,
+                    "kept_messages": kept,
+                })),
+            })
+        }
+        SlashCommand::Clear { confirm } => {
+            // 如果没有确认，那么就不会清空
+            if !confirm {
+                return Ok(ResumeCommandOutcome{
+                    session: session.clone(),
+                    message: Some(
+                        "clear: confirmation required; retun with /clear --confirm".to_string(),
+                    ),
+                    json: Some(serde_json::json!({
+                        "kind": "error",
+                        "error": "confirmation required",
+                        "hint": "rerun with /clear --confirm",
+                    }))
+                })
+            }
+            // 准备好 session 的备用路径
+            let backup_path = write_session_clear_backup(session,session_path)?;
+            // 记录之前的 session_id
+            let previous_session_id = session.session_id.clone();
+            // 生成新的 session
+            let cleared = new_cli_session()?;
+            // 新的 session_id
+            let new_session_id = cleared.session_id.clone();
+            // 新的 session 进行存储
+            cleared.save_to_path(session_path)?;
+            // 给出恢复线索：告诉用户备份文件在哪，可以怎么 resume 旧会话
+            OK(ResumeCommandOutcome{
+                session: cleared,
+                message: Some(format!(
+                    "Session cleared\n  Mode             resumed session reset\n  Previous session {previous_session_id}\n  Backup           {}\n  Resume previous  claw --resume {}\n  New session      {new_session_id}\n  Session file     {}",
+                    backup_path.display(),
+                    backup_path.display(),
+                    session_path.display()
+                )),
+                json: Some(serde_json::json!(
+                    {
+                        "kind": "clear",
+                        "previous_session_id": previous_session_id,
+                        "new_session_id": new_session_id,
+                        "backup": backup_path.display().to_string(),
+                        "session_file": session_path.display().to_string(),
+                    }
+                ))
+            })
+        }
+       SlashCommand::Status => {
+           let tracker = UsageTracker::from_session(session);
+           let usage = tracker.cumulative_usage();
+           let context = status_context(Some(session_path));
+       } 
+    }
+}
+
+fn status_context(
+    session_path: Option<&Path>
+) -> Result<StatusContext, Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    let loader = ConfigLoader::default_for(&cwd);
+    let discovered_config_files = loader.discover().len();
+
+    let (loaded_config_files, sanbox_status, config_load_error) = match loader.load() {
+        Ok(runtime_config) => (
+            runtime_config.loaded_entries().len(),
+            resolve_sanbox_status(runtime_config.sanbox(), &cwd),
+            None,
+        ),
+        Err(err) => (
+            resolve_sandbox_status(&runtime::SandboxConfig::default(), &cwd)<
+            Some(err.to_string()),
+        )
+    }
+}
+
+// 生成一个 session，同时将当前目录设置为工作目录
+fn new_cli_session() -> Result<Session, Box<dyn std::error::Error>> {
+    Ok(Session::new().with_workspace_root(env::current_dir()))
+}
+
+// 清空当前 session 之前，先把现有 session 写成一份备份文件
+fn write_session_clear_backup(
+    session: &Session,
+    session_path: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // 生成备用文件路径
+    let backup_path = session_clear_backup_path(session_path);
+    // 把 session 存入备用文件路径
+    session.save_to_path(&backup_path)?;
+    Ok(backup_path)
+}
+
+// 生成清空 session 前的备份文件路径
+fn session_clear_backup_path(session_path: &Path) -> PathBuf {
+    // 取当前时间戳
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map_or(0, |duration|duration.as_millis());
+    // 取当前文件名称
+    let file_name = session_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("session.jsonl");
+    // 组合一下，生成备份文件路径
+    session_path.with_file_name(format!("{file_name}.before-clear-{timestamp}.bak"))
+}
+
+// 给出压缩的简要报告
+fn format_compact_report(removed: usize, resulting_messages: usize, skipped: bool) -> String {
+    // 如果没有被删除那么记录还剩下多少消息
+    if skipped {
+        format!(
+            "Compact
+  Result           skipped
+  Reason           session below compaction threshold
+  Messages kept    {resulting_messages}"
+        )
+    // 如果触发了压缩，记录移除了多少条，保留了多少条
+    }else {
+        format!(
+            "Compact
+  Result           compacted
+  Messages removed {removed}
+  Messages kept    {resulting_messages}"
+        )
+    }
+}
+
+fn render_repl_help() -> String {
+    [
+        "REPL".to_string(),
+        "  /exit                Quit the REPL".to_string(),
+        "  /quit                Quit the REPL".to_string(),
+        "  Up/Down              Navigate prompt history".to_string(),
+        "  Ctrl-R               Reverse-search prompt history".to_string(),
+        "  Tab                  Complete commands, modes, and recent sessions".to_string(),
+        "  Ctrl-C               Clear input (or exit on empty prompt)".to_string(),
+        "  Shift+Enter/Ctrl+J   Insert a newline".to_string(),
+        "  Auto-save            .claw/sessions/<session-id>.jsonl".to_string(),
+        "  Resume latest        /resume latest".to_string(),
+        "  Browse sessions      /session list".to_string(),
+        "  Show prompt history  /history [count]".to_string(),
+        String::new(),
+        render_slash_command_help_filtered(STUB_COMMANDS),
+    ]
+    .join(
+        "
+",
+    )
+}
+
+// 把一段人类可读的错误信息 message ，归类成一个稳定的、机器可读的错误类型字符串
+fn classify_error_kind(message: &str) -> &'static str {
+    if message.contains("missing Anthropic credentials") {
+        "missing_credentials"
+    } else if message.contains("Manifest source files are missing") {
+        "missing_manifests"
+    } else if message.contains("no worker state file found") {
+        "missing_worker_state"
+    } else if message.contains("session not found") {
+        "session_not_found"
+    } else if message.contains("failed to restore session") {
+        "session_load_failed"
+    } else if message.contains("no managed sessions found") {
+        "no_managed_sessions"
+    } else if message.contains("unrecognized argument") || message.contains("unknown option") {
+        "cli_parse"
+    } else if message.contains("invalid model syntax") {
+        "invalid_model_syntax"
+    } else if message.contains("is not yet implemented") {
+        "unsupported_command"
+    } else if message.contains("unsupported resumed command") {
+        "unsupported_resumed_command"
+    } else if message.contains("confirmation required") {
+        "confirmation_required"
+    } else if message.contains("api failed") || message.contains("api returned") {
+        "api_http_error"
+    } else {
+        "unknown"
+    }
+}
+
+// 返回 错误摘要 以及 详细错误原因
+fn split_error_hint(message: &str) -> (String, Option<String>) {
+    match message.split_once('\n') {
+        Some((short, hint)) => (short.to_string(), Some(hint.trim().to_string())),
+        None => (message.to_string(), None),
+    }
+}
+
+fn load_session_reference(
+    reference: &str,
+) -> Result<(SessionHandle, Session), Box<dyn std::error::Error>> {
+    let loaded = current_session_store()?
+        .load_session(reference)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+    Ok((
+        SessionHandle {
+            id: loaded.handle.id,
+            path: loaded.handle.path,
+        },
+        loaded.session,
+    ))
+}
+
+fn current_session_store() -> Result<runtime::SessionStore, Box<dyn std::error::Error>> {
+    let cwd = env::current_dir()?;
+    // 最后错误需要把具体错误类型擦除成 trait object
+    runtime::SessionStore::from_cwd(&cwd).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+}
+
+fn print_version(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
+    match output_format {
+        CliOutputFormat::Text => println!("{}", render_version_report()),
+        CliOutputFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&version_json_value())?);
+        }
+    }
+    Ok(())
+}
+
+fn render_version_report() -> String {
+    let git_sha = GIT_SHA.unwrap_or("unknown");
+    let target = BUILD_TARGET.unwrap_or("unknown");
+    format!(
+        "Claw Code\n Version     {VERSION}\n Git SHA          {git_sha}\n  Target           {target}\n  Build date       {DEFAULT_DATE}"
+    )
+}
+
+fn version_json_value() -> serde_json::Value {
+    // 获取 当前正在运行的这个程序对应的可执行文件路径
+    let executable_path = env::current_exe().ok().map(|p| p.display().to_string());
+    json!({
+        "kind": "version",
+        "message": render_version_report(),
+        "version": VERSION,
+        "target": BUILD_TARGET,
+        "build_date": BUILD_DATE,
+        "executable_path": executable_path,
+    })
 }
 
 fn print_system_prompt(

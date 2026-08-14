@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,7 +11,9 @@ import (
 )
 
 func init() {
-	internal.RegisterStreamChunkConcatFunc()
+	internal.RegisterStreamChunkConcatFunc(ConcatMessage)
+	internal.RegisterStreamChunkConcatFunc(ConcatMessageArray)
+	internal.RegisterStreamChunkConcatFunc(ConcatToolResults)
 }
 
 type RoleType string
@@ -63,7 +66,7 @@ type TokenUsage struct {
 }
 
 type LogProbs struct {
-	Content []LogProb `json"content"`
+	Content []LogProb `json:"content"`
 }
 
 type LogProb struct {
@@ -88,7 +91,42 @@ type CompletionTokenDetails struct {
 }
 
 type ChatMessagePart struct {
-	Type ChatMessagePartType `json:"type,omitempty"`
+	Type     ChatMessagePartType  `json:"type,omitempty"`
+	Text     string               `json:"text,omitempty"`
+	ImageURL *ChatMessageImageURL `json:"image_url,omitempty"`
+	AudioURL *ChatMessageAudioURL `json:"audio_url,omitempty"`
+	VideoURL *ChatMessageVideoURL `json:"video_url,omitempty"`
+	FileURL  *ChatMessageFileURL  `json:"file_url,omitempty"`
+}
+
+type ChatMessageImageURL struct {
+	URL      string         `json:"url,omitempty"`
+	URI      string         `json:"uri,omitempty"`
+	Detail   ImageURLDetail `json:"detail,omitempty"`
+	MIMEType string         `json:"mime_type,omitempty"`
+	Extra    map[string]any `json:"extra,omitempty"`
+}
+
+type ChatMessageAudioURL struct {
+	URL      string         `json:"url,omitempty"`
+	URI      string         `json:"uri,omitempty"`
+	MIMEType string         `json:"mime_type,omitempty"`
+	Extra    map[string]any `json:"extra,omitempty"`
+}
+
+type ChatMessageVideoURL struct {
+	URL      string         `json:"url,omitempty"`
+	URI      string         `json:"uri,omitempty"`
+	MIMEType string         `json:"mime_type,omitempty"`
+	Extra    map[string]any `json:"extra,omitempty"`
+}
+
+type ChatMessageFileURL struct {
+	URL      string         `json:"url,omitempty"`
+	URI      string         `json:"uri,omitempty"`
+	MIMEType string         `json:"mime_type,omitempty"`
+	Name     string         `json:"name,omitempty"`
+	Extra    map[string]any `json:"extra,omitempty"`
 }
 
 type MessageInputPart struct {
@@ -178,6 +216,221 @@ type ToolCall struct {
 type FunctionCall struct {
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
+}
+
+type ToolArgument struct {
+	Text string `json:"text,omitempty"`
+}
+
+type ToolResult struct {
+	Parts []ToolOutputPart `json:"parts,omitempty"`
+}
+
+type ToolOutputPart struct {
+	Type  ToolPartType     `json:"type"`
+	Text  string           `json:"text,omitempty"`
+	Image *ToolOutputImage `json:"image,omitemtpy"`
+	Audio *ToolOutputAudio `json:"audio,omitempty"`
+	Video *ToolOutputVideo `json:"video,omitempty"`
+	File  *ToolOutputFile  `json:"file,omitempty"`
+	Extra map[string]any   `json:"extra,omitempty"`
+}
+
+type ToolPartType string
+
+const (
+	ToolPartTypeText  ToolPartType = "text"
+	ToolPartTypeImage ToolPartType = "image"
+	ToolPartTypeAudio ToolPartType = "audio"
+	ToolPartTypeVideo ToolPartType = "video"
+	ToolPartTypeFile  ToolPartType = "file"
+)
+
+type ToolOutputImage struct {
+	MessagePartCommon
+}
+
+type ToolOutputAudio struct {
+	MessagePartCommon
+}
+
+type ToolOutputVideo struct {
+	MessagePartCommon
+}
+
+type ToolOutputFile struct {
+	MessagePartCommon
+}
+type FormatType uint8
+
+const (
+	FString    FormatType = 0
+	GoTemplate FormatType = 1
+	Jinja2     FormatType = 2
+)
+
+type MessagesTemplate interface {
+	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
+}
+
+// 过滤二维数组 [][]*Message，实际上就是批量底层调用了 ConcatMessage
+func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
+	arrayLen := len(mas[0])
+
+	ret := make([]*Message, arrayLen)
+	slicesToConcat := make([][]*Message, arrayLen)
+
+	for _, ma := range mas {
+		// 每一个子数组的长度都应该相等
+		if len(ma) != arrayLen {
+			return nil, fmt.Errorf("unexpected array length. "+
+				"Got %d, expected %d", len(ma), arrayLen)
+		}
+
+		// 过滤 nil
+		for i := 0; i < arrayLen; i++ {
+			m := ma[i]
+			if m != nil {
+				slicesToConcat[i] = append(slicesToConcat[i], m)
+			}
+		}
+	}
+
+	for i, slice := range slicesToConcat {
+		if len(slice) == 0 {
+			ret[i] = nil
+		} else if len(slice) == 1 {
+			ret[i] = slice[0]
+		} else {
+			cm, err := ConcatMessage(slice)
+			if err != nil {
+				return nil, err
+			}
+
+			ret[i] = cm
+		}
+	}
+
+	return ret, nil
+}
+
+func ConcatToolResults(chunks []*ToolResult) (*ToolResult, error) {
+	if len(chunks) == 0 {
+		return &ToolResult{}, nil
+	}
+
+	nonTextPartType := make(map[ToolPartType]int)
+
+	var allParts []ToolOutputPart
+	for chunkIdx, chunk := range chunks {
+		if chunk == nil || len(chunk.Parts) == 0 {
+			continue
+		}
+
+		for _, part := range chunk.Parts {
+			// 当前这个非文本类型之前如果出现在其他 chunk 里，直接报错
+			if part.Type != ToolPartTypeText {
+				// 文本输出可能是流式一点点吐出来的，所以可以拆成多个 chunk，再合并
+				// 但像图片、音频、文件这种非文本内容，通常是一个完整对象，不适合在多个 chunk 中重复声明同一种类型
+				if prevChunkIdx, exists := nonTextPartType[part.Type]; exists {
+					return nil, fmt.Errorf("conflecting %s parts found in chunk %d and chunk %d:"+
+						"non-text modality parts cannot appear in multiple chunks", part.Type, prevChunkIdx, chunkIdx)
+				}
+				nonTextPartType[part.Type] = chunkIdx
+			}
+		}
+
+		mergedChunkParts, err := concatToolOutputParts(chunk.Parts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge text parts in chunk %d: %w", chunkIdx, err)
+		}
+
+		allParts = append(allParts, mergedChunkParts...)
+	}
+
+	if len(allParts) == 0 {
+		return &ToolResult{}, nil
+	}
+
+	return &ToolResult{Parts: allParts}, nil
+}
+
+// 分组后合并
+func concatToolOutputParts(parts []ToolOutputPart) ([]ToolOutputPart, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+
+	groups := groupToolOutputParts(parts)
+
+	merged := make([]ToolOutputPart, 0, len(groups))
+	for _, group := range groups {
+		if len(group) == 1 {
+			merged = append(merged, group...)
+			continue
+		}
+
+		switch group[0].Type {
+		case ToolPartTypeText:
+			mergedPart, err := mergeToolTextParts(group)
+			if err != nil {
+				return nil, err
+			}
+			merged = append(merged, mergedPart)
+		default:
+			merged = append(merged, group...)
+		}
+	}
+
+	return merged, nil
+}
+
+// 把连续的 Text 元素进行分组
+func groupToolOutputParts(parts []ToolOutputPart) [][]ToolOutputPart {
+	groups := make([][]ToolOutputPart, 0)
+	i := 0
+	for i < len(parts) {
+		if parts[i].Type == ToolPartTypeText {
+			end := i + 1
+			// 继续向后找，直到遇到第一个非文本元素
+			for end < len(parts) && parts[end].Type == ToolPartTypeText {
+				end++
+			}
+			groups = append(groups, parts[i:end])
+		} else {
+			// 只把当前这一个元素 parts[i:i+1] 作为一组加入 groups
+			groups = append(groups, parts[i:i+1])
+			i++
+		}
+	}
+	return groups
+}
+
+// 把 text 合并，extra map 合并
+func mergeToolTextParts(group []ToolOutputPart) (ToolOutputPart, error) {
+	var sb strings.Builder
+	extraList := make([]map[string]any, 0, len(group))
+	for _, part := range group {
+		sb.WriteString(part.Text)
+		if len(part.Extra) > 0 {
+			extraList = append(extraList, part.Extra)
+		}
+	}
+
+	var mergedExtra map[string]any
+	if len(extraList) > 0 {
+		var err error
+		mergedExtra, err = concatExtra(extraList)
+		if err != nil {
+			return ToolOutputPart{}, fmt.Errorf("failed to concat tool output text part extra: %w", err)
+		}
+	}
+
+	return ToolOutputPart{
+		Type:  ToolPartTypeText,
+		Text:  sb.String(),
+		Extra: mergedExtra,
+	}, nil
 }
 
 func ConcatMessage(msgs []*Message) (*Message, error) {
@@ -359,9 +612,16 @@ func ConcatMessage(msgs []*Message) (*Message, error) {
 		ret.MultiContent = multiContentParts
 	}
 
+	// 多模态分片必须按照规则拼接，而不是简单像 content 一样拼接
 	if len(assistantGenMultiContentParts) > 0 {
 		merged, err := concatAssistantMultiContent(assistantGenMultiContentParts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to concat message's assistant multicontent: %w", err)
+		}
+		ret.AssistantGenMultiContent = merged
 	}
+
+	return &ret, nil
 }
 
 func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart, error) {
@@ -373,7 +633,7 @@ func concatAssistantMultiContent(parts []MessageOutputPart) ([]MessageOutputPart
 
 	merged := make([]MessageOutputPart, 0, len(groups))
 	for _, group := range groups {
-		mergedPart, err := mergeOuputPartGroup(group)
+		mergedPart, err := mergeOutputPartGroup(group)
 		if err != nil {
 			return nil, err
 		}
@@ -475,6 +735,65 @@ func mergeReasoningParts(group []MessageOutputPart) (MessageOutputPart, error) {
 		Extra:         mergedExtra,
 		StreamingMeta: group[0].StreamingMeta,
 	}, nil
+}
+
+// 把不同部分的 audio 内部的 base64 编码依次拼接在一起
+func mergeAudioParts(group []MessageOutputPart) (MessageOutputPart, error) {
+	var b64Builder strings.Builder
+	var mimeType string
+
+	audioExtraList := make([]map[string]any, 0, len(group))
+	partExtraList := make([]map[string]any, 0, len(group))
+
+	// 收集阶段
+	for _, part := range group {
+		audioPart := part.Audio
+		if audioPart.Base64Data != nil {
+			b64Builder.WriteString(*audioPart.Base64Data)
+		}
+		if mimeType == "" {
+			mimeType = audioPart.MIMEType
+		}
+		if len(audioPart.Extra) > 0 {
+			audioExtraList = append(audioExtraList, audioPart.Extra)
+		}
+		if len(part.Extra) > 0 {
+			partExtraList = append(partExtraList, part.Extra)
+		}
+	}
+
+	// 拼接阶段
+	var mergedAudioExtra map[string]any
+	var err error
+	if len(audioExtraList) > 0 {
+		mergedAudioExtra, err = concatExtra(audioExtraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat audio extra: %w", err)
+		}
+	}
+
+	var mergedPartExtra map[string]any
+	if len(partExtraList) > 0 {
+		mergedPartExtra, err = concatExtra(partExtraList)
+		if err != nil {
+			return MessageOutputPart{}, fmt.Errorf("failed to concat audio part extra: %w", err)
+		}
+	}
+
+	mergedB64 := b64Builder.String()
+	return MessageOutputPart{
+		Type: ChatMessagePartTypeAudioURL,
+		Audio: &MessageOutputAudio{
+			MessagePartCommon: MessagePartCommon{
+				Base64Data: &mergedB64,
+				MIMEType:   mimeType,
+				Extra:      mergedAudioExtra,
+			},
+		},
+		Extra:         mergedPartExtra,
+		StreamingMeta: group[0].StreamingMeta,
+	}, nil
+
 }
 
 // 对 MessageOutputPart 进行分组

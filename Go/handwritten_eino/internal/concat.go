@@ -53,6 +53,7 @@ func concatStrings(ss []string) (string, error) {
 	return b.String(), nil
 }
 
+// 注册 []T 的拼接函数
 func RegisterStreamChunkConcatFunc[T any](fn func([]T) (T, error)) {
 	concatFuncs[generic.TypeOf[T]()] = fn
 }

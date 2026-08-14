@@ -76,7 +76,7 @@ type globalResumeInfo struct {
 	id2Addr           map[string]Address
 }
 
-// 从 ctx 中获取
+// 从 ctx 中获取 graph 中执行到哪里了，比如处在某个 graph node 下的某个 tool call
 func GetCurrentAddress(ctx context.Context) Address {
 	if p, ok := ctx.Value(addrCtx{}).(*addrCtx); ok {
 		return p.addr
@@ -84,7 +84,9 @@ func GetCurrentAddress(ctx context.Context) Address {
 	return nil
 }
 
+// 把当前的位置信息追加到地址末尾
 func AppendAddressSegment(ctx context.Context, segType AddressSegmentType, segID string, subID string) context.Context {
+	// 获取当前的具体位置
 	currentAddress := GetCurrentAddress(ctx)
 	if len(currentAddress) == 0 {
 		currentAddress = []AddressSegment{

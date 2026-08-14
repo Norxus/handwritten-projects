@@ -95,6 +95,7 @@ pub const fn model_family_identity_for_kind(kind: ProviderKind) -> runtime::Mode
     }
 }
 
+// 从 .env 下获取 key 对应的 value 值
 pub(crate) fn dotenv_value(key: &str) -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
     let values = load_dotenv_file(&cwd.join(".env"))?;

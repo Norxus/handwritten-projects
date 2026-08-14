@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/gob"
+	"reflect"
 
 	"github.com/cloudwego/eino/internal/generic"
 	"github.com/cloudwego/eino/internal/serialization"
@@ -37,9 +38,8 @@ func init() {
 	RegisterName[PromptTokenDetails]("_eino_prompt_token_details")
 }
 
-
 // 给任意类型 T 注册一个指定名字
-func RegisterName[T any] (name string) {
+func RegisterName[T any](name string) {
 	// 把某个具体类型 T 注册到 Go 的 encoding/gob 序列化系统里
 	gob.RegisterName(name, generic.NewInstance[T]())
 
@@ -48,3 +48,48 @@ func RegisterName[T any] (name string) {
 		panic(err)
 	}
 }
+
+// 获取类型名（全限定名）
+func getTypeName(rt reflect.Type) string {
+	name := rt.String()
+
+	star := ""
+
+	// 当前类型本身不是命名类型
+	if rt.Name() == "" {
+		// 如果它是指针，就拆一层 * 看看它指向的元素是不是命名类型
+		if pt := rt; pt.Kind() == reflect.Pointer {
+			// 用 star 记录这是一个指针
+			star = "*"
+			rt = pt.Elem()
+		}
+	}
+
+	// 如果是命名类型，有包前缀就加上包前缀
+	if rt.Name() != "" {
+		if rt.PkgPath() == "" {
+			name = star + rt.Name()
+		} else {
+			name = star + rt.PkgPath() + "." + rt.Name()
+		}
+	}
+	// 如果最终仍然不是命名类型，就直接返回最开始的 rt.String()
+	return name
+}
+
+func Register[T any]() {
+	value := generic.NewInstance[T]()
+
+	gob.Register(value)
+
+	// 获取全限定名
+	name := getTypeName(reflect.TypeOf(value))
+
+	// 把 T 按这个名字注册到项目自己的序列化注册表里
+	err := serialization.GenericRegister[T](name)
+	if err != nil {
+		panic(err)
+	}
+}
+
+

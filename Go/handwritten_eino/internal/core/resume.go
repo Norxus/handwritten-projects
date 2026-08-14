@@ -2,6 +2,7 @@ package core
 
 import "context"
 
+// 从 context.Context 里取出“上一次被 interrupt 时保存的状态”，并且用泛型 T 做一次类型安全的解析
 func GetInterruptState[T any](ctx context.Context) (wasInterrupted bool, hasState bool, state T) {
 	rCtx, ok := getRunCtx(ctx)
 	// 这次执行不是从中断恢复来的

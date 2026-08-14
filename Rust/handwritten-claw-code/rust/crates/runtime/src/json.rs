@@ -18,6 +18,7 @@ pub enum JsonValue {
 
 impl JsonValue {
     #[must_use]
+    // 打印 JsonValue 的具体值
     pub fn render(&self) -> String {
         match self {
             Self::Null => "null".to_string(),
@@ -40,7 +41,9 @@ impl JsonValue {
                     .map(|key, value| format!("{}:{}", render_string(key), value.render()))
                     .collect::<Vec<_>>()
                     .join(",");
-                format!("{{rendered}}")
+                // 这里输出 3 个大括号，原因在于第一个个 { 实际上是转义括号
+                // 最终输出 { + rendered 的内容 + }
+                format!("{{{rendered}}}")
             }
         }
     }
@@ -52,13 +55,14 @@ impl JsonValue {
         // 剔除掉结尾多余的空白
         parser.skip_whitespace();
         if parser.is_eof() {
-           Ok(value)
-        }else {
+            Ok(value)
+        } else {
             Err(JsonError::new("unexpected trailing content"))
         }
     }
 
     #[must_use]
+    // 这里 object 实际上是 BTreeMap 类型
     pub fn as_object(&self) -> Option<&BTreeMap<String, JsonValue>> {
         match self {
             Self::Object(value) => Some(value),
@@ -97,7 +101,6 @@ impl JsonValue {
             _ => None,
         }
     }
-
 }
 
 // 生成一个合法的 JSON 字符串，这样才可以被 JSON 类型的 string 类型进行承接
@@ -120,7 +123,7 @@ fn render_string(value: &str) -> String {
             '\u{08}' => rendered.push_str("\\b"),
             '\u{0C}' => rendered.push_str("\\f"),
             // 但它仍然是控制字符，那就把它转成 Unicode 转义形式输出
-            control if control.is_control() => push_unicode_escape(&mut rendered, control)
+            control if control.is_control() => push_unicode_escape(&mut rendered, control),
             plain => rendered.push(plain),
         }
     }
@@ -180,7 +183,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    // 根据首字母决定应该如何转换
+    // 根据首字母决定应该如何转换，转换成对应的 Rust 类型
     fn parse_value(&mut self) -> Result<JsonValue, JsonError> {
         self.skip_whitespace();
         match self.peek() {
@@ -364,13 +367,5 @@ impl<'a> Parser<'a> {
 
     fn is_eof(&self) -> bool {
         self.index >= self.chars.len()
-    }
-}
-
-impl JsonValue {
-    pub fn parse(source: &str) -> Result<Self, JsonError> {
-        let mut parser = Parser::new(source);
-        let value = parser.parse_value()?;
-        parser.skip_whitespace();
     }
 }

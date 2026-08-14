@@ -1,4 +1,5 @@
 mod bootstrap;
+mod compact;
 mod config;
 mod config_validate;
 mod conversation;
@@ -11,8 +12,11 @@ mod permissions;
 mod prompt;
 mod sandbox;
 mod session;
+mod session_control;
+mod usage;
 
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
+pub use compact::compact_session;
 pub use config::{ConfigError, ConfigLoader, ResolvedPermissionMode, ScopedMcpServerConfig};
 pub use config_validate::check_unsupported_format;
 pub use conversation::ConversationRuntime;
@@ -24,4 +28,6 @@ pub use prompt::{
     load_system_prompt, ContextFile, ModelFamilyIdentity, ProjectContext, SystemPromptBuilder,
 };
 pub use sandbox::{FilesystemIsolationMode, SandboxConfig};
-pub use session::{ConversationMessage, SessionCompaction, TokenUsage};
+pub use session::{ConversationMessage, Session, SessionCompaction, TokenUsage};
+pub use session_control::SessionStore;
+pub use usage::UsageTracker;

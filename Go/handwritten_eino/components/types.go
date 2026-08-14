@@ -21,3 +21,26 @@ const (
 	// ComponentOfTool identifies tool components.
 	ComponentOfTool Component = "Tool"
 )
+
+type Typer interface {
+	GetType() string
+}
+
+func GetType(component any) (string, bool) {
+	if typer, ok := component.(Typer); ok {
+		return typer.GetType(), true
+	}
+
+	return "", false
+}
+
+type Checker interface {
+	IsCallbacksEnabled() bool
+}
+
+func IsCallbacksEnabled(i any) bool {
+	if checker, ok := i.(Checker); ok {
+		return checker.IsCallbacksEnabled()
+	}
+	return false
+}
