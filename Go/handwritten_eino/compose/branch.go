@@ -19,13 +19,20 @@ type GraphMultiBranchCondition[T any] func(ctx context.Context, in T) (endNode m
 
 type StreamGraphMultiBranchCondition[T any] func(ctx context.Context, in *schema.StreamReader[T]) (endNodes map[string]bool, err error)
 
+// 图调度中的分支结构，用来在某个节点执行完之后，根据输入动态决定接下来走到哪些节点
 type GraphBranch struct {
-	invoke    func(ctx context.Context, input any) (output []string, err error)
-	collect   func(ctx context.Context, input streamReader) (output []string, err error)
+	// 用于处理普通输入，输出选择出来的后继节点
+	invoke func(ctx context.Context, input any) (output []string, err error)
+	// 用于处理流式输入，输出选择出来的后继节点
+	collect func(ctx context.Context, input streamReader) (output []string, err error)
+	// inputType 和 genericHelper 让图编译、连接、类型检查时知道这个 branch 需要什么输入类型
 	inputType reflect.Type
 	*genericHelper
-	endNodes   map[string]bool
-	idx        int
+	// 记录这个分支允许跳转到哪些节点
+	endNodes map[string]bool
+	// 并行执行分支时的编号
+	idx int
+	// 表明是否该分支只控制路由，不参与普通数据流传递，也就是不会讲上一节点的输出作为输入传入下一个节点
 	noDataFlow bool
 }
 
@@ -33,6 +40,7 @@ func (gb *GraphBranch) GetEndNode() map[string]bool {
 	return gb.endNodes
 }
 
+// 把一个泛型的 runnablePacker[T, []string, any] 包装成统一的 *GraphBranch
 func newGraphBranch[T any](r *runnablePacker[T, []string, any], endNodes map[string]bool) *GraphBranch {
 	return &GraphBranch{
 		invoke: func(ctx context.Context, input any) (output []string, err error) {

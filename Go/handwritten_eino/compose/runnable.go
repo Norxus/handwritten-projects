@@ -363,3 +363,27 @@ func (rp *runnablePacker[I, O, TOption]) toComposableRunnable() *composableRunna
 
 	return c
 }
+
+// 透传节点
+func composablePassthrough() *composableRunnable {
+	r := &composableRunnable{isPassthrough: true, nodeInfo: &nodeInfo{}}
+
+	// 啥也不干直接返回
+	r.i = func(ctx context.Context, input any, opts ...any) (output any, err error) {
+		return input , nil
+	}
+
+	r.t = func(ctx context.Context, input streamReader, opts ...any) (output streamReader, err error) {
+		return input, nil
+	}
+
+	// 标记自己是 Passthrough
+	r.meta = &executorMeta{
+		component: ComponentOfPassthrough,
+		isComponentCallbackEnabled: false,
+		componentImplType: "Passthrough",
+	}
+
+	return r
+}
+

@@ -11,7 +11,7 @@ type Source struct {
 }
 
 type Loader interface {
-	Load(ctx context.Context, src Source, opts ...Loader)
+	Load(ctx context.Context, src Source, opts ...Loader) ([]*schema.Document, error)
 }
 
 type Transformer interface {

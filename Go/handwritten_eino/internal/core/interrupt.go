@@ -50,8 +50,10 @@ func WithLayerPayload(payload any) InterruptOption {
 	}
 }
 
+// 对于复合节点来说可能有多个子节点，所以有子中断这个概念，需要记录这些子节点的中断情况
 func Interrupt(ctx context.Context, info any, state any, subContexts []*InterruptSignal, opts ...InterruptOption) (
 	*InterruptSignal, error) {
+	// 标记是哪个节点触发了中断
 	addr := GetCurrentAddress(ctx)
 
 	config := &InterruptConfig{}

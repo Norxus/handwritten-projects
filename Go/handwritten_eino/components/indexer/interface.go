@@ -7,5 +7,5 @@ import (
 )
 
 type Indexer interface {
-	Store(ctx context.Context, docs []*schema.Document, opts ...Option)
+	Store(ctx context.Context, docs []*schema.Document, opts ...Option) (ids []string, err error)
 }

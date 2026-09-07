@@ -118,3 +118,7 @@ func (cb *ChainBranch) AddToolsNode(key string, node *ToolsNode, opts ...GraphAd
 	return cb.addNode(key, gNode, options)
 }
 
+func (cb *ChainBranch) AddLambda(key string, node *Lambda, opts ...GraphAddNodeOpt) *ChainBranch {
+	gNode, options := toLambdaNode(node, opts...)
+	return cb.addNode(key, gNode, options)
+}

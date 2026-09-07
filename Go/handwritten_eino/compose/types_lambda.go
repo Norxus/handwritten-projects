@@ -12,3 +12,7 @@ type Stream[I, O, TOption any] func(ctx context.Context, input I, opts ...TOptio
 type Collect[I, O, TOption any] func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output O, err error)
 
 type Transform[I, O, TOption any] func(ctx context.Context, input *schema.StreamReader[I], opts ...TOption) (output *schema.StreamReader[O], err error)
+
+type Lambda struct {
+	executor *composableRunnable
+}

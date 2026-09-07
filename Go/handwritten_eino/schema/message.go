@@ -273,6 +273,32 @@ type MessagesTemplate interface {
 	Format(ctx context.Context, vs map[string]any, formatType FormatType) ([]*Message, error)
 }
 
+type toolMessageOptions struct {
+	toolName string
+}
+
+type ToolMessageOption func(*toolMessageOptions)
+
+func WithToolName(name string) ToolMessageOption {
+	return func(o *toolMessageOptions) {
+		o.toolName = name
+	}
+}
+
+// 返回工具调用的结果消息
+func ToolMessage(content string, toolCallID string, opts ...ToolMessageOption) *Message {
+	o := &toolMessageOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return &Message{
+		Role:       Tool,
+		Content:    content,
+		ToolCallID: toolCallID,
+		ToolName:   o.toolName,
+	}
+}
+
 // 过滤二维数组 [][]*Message，实际上就是批量底层调用了 ConcatMessage
 func ConcatMessageArray(mas [][]*Message) ([]*Message, error) {
 	arrayLen := len(mas[0])
@@ -953,4 +979,77 @@ func concatExtra(extraList []map[string]any) (map[string]any, error) {
 		return generic.CopyMap(extraList[0]), nil
 	}
 	return internal.ConcatItems(extraList)
+}
+
+type ToolResult struct {
+	Parts []ToolOutputPart `json:"parts,omitempty"`
+}
+
+func (tr *ToolResult) ToMessageInputParts() ([]MessageInputPart, error) {
+	if tr == nil || len(tr.Parts) == 0 {
+		return nil, nil
+	}
+
+	result := make([]MessageInputPart, len(tr.Parts))
+	for i, part := range tr.Parts {
+		var err error
+		result[i], err = convToolOutputPartToMessageInputPart(part)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
+}
+
+// 把工具的执行结果转换成模型消息输入里的一个 MessageInputPart
+func convToolOutputPartToMessageInputPart(toolPart ToolOutputPart) (MessageInputPart, error) {
+	switch toolPart.Type {
+	case ToolPartTypeText:
+		return MessageInputPart{
+			Type:  ChatMessagePartTypeText,
+			Text:  toolPart.Text,
+			Extra: toolPart.Extra,
+		}, nil
+	case ToolPartTypeImage:
+		if toolPart.Image == nil {
+			return MessageInputPart{}, fmt.Errorf("image content is nil for tool part type %v", toolPart.Type)
+		}
+		return MessageInputPart{
+			Type: ChatMessagePartTypeImageURL,
+			Image: &MessageInputImage{
+				MessagePartCommon: toolPart.Image.MessagePartCommon,
+			},
+			Extra: toolPart.Extra,
+		}, nil
+	case ToolPartTypeAudio:
+		if toolPart.Audio == nil {
+			return MessageInputPart{}, fmt.Errorf("audio content is nil for tool part type %v", toolPart.Type)
+		}
+		return MessageInputPart{
+			Type:  ChatMessagePartTypeAudioURL,
+			Audio: &MessageInputAudio{MessagePartCommon: toolPart.Audio.MessagePartCommon},
+			Extra: toolPart.Extra,
+		}, nil
+	case ToolPartTypeVideo:
+		if toolPart.Video == nil {
+			return MessageInputPart{}, fmt.Errorf("video content is nil  for tool part type %v", toolPart.Type)
+		}
+		return MessageInputPart{
+			Type:  ChatMessagePartTypeVideoURL,
+			Video: &MessageInputVideo{MessagePartCommon: toolPart.Video.MessagePartCommon},
+			Extra: toolPart.Extra,
+		}, nil
+	case ToolPartTypeFile:
+		if toolPart.File == nil {
+			return MessageInputPart{}, fmt.Errorf("file content is nil for tool part type %v", toolPart.Type)
+		}
+		return MessageInputPart{
+			Type:  ChatMessagePartTypeFileURL,
+			File:  &MessageInputFile{MessagePartCommon: toolPart.File.MessagePartCommon},
+			Extra: toolPart.Extra,
+		}, nil
+	default:
+		return MessageInputPart{}, fmt.Errorf("unknown tool part type: %v", toolPart.Type)
+	}
 }

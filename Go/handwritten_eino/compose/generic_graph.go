@@ -11,3 +11,7 @@ type newGraphOptions struct {
 }
 
 type NewGraphOption func(ngo *newGraphOptions)
+
+type Graph[I, O any] struct {
+	*graph
+}
